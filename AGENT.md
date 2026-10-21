@@ -41,7 +41,7 @@ Every event dict returned to the client has: `uid`, `title`, `start`, `end`, `al
 
 These are the load-bearing constraints. Breaking any of them is a bug, not a style choice.
 
-1. **Test-mode isolation.** `TEST_CAL` defaults to **on**. When on, *every* read and write is routed to the calendar named by `TEST_CAL_NAME` (default `Test Calendar`), never the real calendar. `update_event` and `delete_event` look the event up **only in the target calendar** (`get_calendar(client).event_by_uid(uid)`), never by scanning all calendars. A UID collision must never let a test-mode call touch a real-calendar event. If you add an all-calendars search, you break this.
+1. **Test-mode isolation.** `TEST_CAL` defaults to **on**. When on, *every* read and write is routed to the calendar named by `TEST_CAL_NAME` (default `Test Calendar`), never the real calendar. `update_event` and `delete_event` look the event up **only in the target calendar** via `fetch_event_by_uid(client, cal, uid)`, never by scanning all calendars. A UID collision must never let a test-mode call touch a real-calendar event. If you add an all-calendars search, you break this.
 2. **All-day storage.** All-day events are stored with `VALUE=DATE` on DTSTART/DTEND and tagged `CATEGORIES: ALL-DAY-EVENT`. The `VALUE=DATE` parameter is *required*: iCloud reinterprets a bare date as a floating datetime on the *previous* day at 23:00, shifting the event back a day. `set_all_day_dates` in `helpers.py` owns this encoding — do not hand-roll DATE construction elsewhere.
 3. **Naive-time interpretation.** A timed input with no offset is interpreted in `tz` (default `America/Los_Angeles`), **not** UTC. A value with an offset is stored as-is. This is the single most common way to get a wrong time.
 4. **No secrets in the repo.** Credentials are runtime env vars only (`CALDAV_USER`, `CALDAV_PASSWORD`, `CALDAV_URL`, `CALENDAR_NAME`, `MCP_HOST`, `MCP_PORT`, `TEST_CAL`, `TEST_CAL_NAME`). The source must build and run without any credential baked in.
@@ -81,14 +81,14 @@ The test suite runs **without any CalDAV connection** — the network layer is m
 - `update_test.py` — the update path.
 - `create_test.py` — create + update tool logic.
 
-`create_test.py` and `update_test.py` monkeypatch `server.get_client` and `server.get_calendar` (the latter returns a `FakeCalendar` whose `event_by_uid` returns a captured `FakeEvent`). **If you change how `server.py` resolves the calendar or looks up an event, update these mocks in the same change** — they encode the current lookup contract (scoped `event_by_uid`, not an all-calendars scan).
+`create_test.py` and `update_test.py` monkeypatch `server.get_client` and `server.get_calendar` (the latter returns a `FakeCalendar` whose `get_events` returns captured `FakeEvent`s). **If you change how `server.py` resolves the calendar or looks up an event, update these mocks in the same change** — they encode the current lookup contract (scoped time-range REPORT + in-memory UID match, not an all-calendars scan).
 
 Run locally: `pip install -r requirements.txt` then run each script. CI runs the same loop in the `test` job; it is a hard gate on the `docker` job, so a broken test blocks the image build.
 
 ## Known quirks (iCloud-specific)
 
 - **DATE → DATETIME read-back.** iCloud returns all-day events as a DATETIME at midnight UTC on read-back. The server detects the `ALL-DAY-EVENT` category and displays these as date-only.
-- **412 Precondition Failed on update.** Happens when the event's etag changed since it was read (another client modified it). `update_event` re-reads, re-applies, and saves, retrying up to 3 times. Most updates succeed on the first save.
+- **412 Precondition Failed on update.** Two distinct sources: (a) the *lookup* — iCloud rejects a UID-only `calendar-query` REPORT with 412, so lookups must carry a time range (`fetch_event_by_uid`); (b) the *PUT* — the event's etag changed since it was read (another client modified it). `update_event` re-reads via `fetch_event_by_uid`, re-applies, and saves, retrying up to 3 times. Most updates succeed on the first save.
 - **Recurring create → 403.** Covered above; expected, not a bug.
 - **First-connect reset.** A transient `ConnectionResetError` on the very first CalDAV connect is retried internally. If the MCP gateway dialed the upstream before the server finished coming up, the gateway's calendar client stays down until `docker compose restart mcp-gateway`.
 
