@@ -7,6 +7,7 @@ from datetime_parser import parse_datetime, parse_datetime_for_ical, ParsedDateT
 from recurrence import expand_recurring
 from helpers import event_to_dict, input_is_all_day, vevent_to_dict, build_event_feedback, all_day_end_date, set_all_day_dates
 from caldav import DAVClient
+from caldav.lib import error as _caldav_error
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 logging.basicConfig(level=logging.INFO)
@@ -94,6 +95,33 @@ def fetch_event_by_uid(client, cal, uid: str):
         if str(getattr(event, "id", "") or "") == uid:
             return event
     return None
+
+# caldav raises typed 412 exceptions when a stale If-Match / If-Schedule-Tag-Match
+# is sent: ETagMismatchError and ScheduleTagMismatchError. The UID-conflict 412s
+# (UidConflictETagMismatchError, UidConflictScheduleTagMismatchError) inherit from
+# them, so catching these two covers every 412 save. Older caldav may not define
+# them; _is_412 then falls back to a status-code check.
+_412_TYPES = tuple(
+    t
+    for t in (
+        getattr(_caldav_error, "ETagMismatchError", None),
+        getattr(_caldav_error, "ScheduleTagMismatchError", None),
+    )
+    if t is not None
+)
+
+
+def _is_412(exc: Exception) -> bool:
+    """True if exc is a CalDAV 412 Precondition Failed.
+
+    Primary: the typed 412 exceptions caldav raises for a stale If-Match /
+    If-Schedule-Tag-Match. Fallback: the 412 status code in the error text,
+    for caldav versions that surface a 412 as a bare PutError/ReportError.
+    """
+    if _412_TYPES and isinstance(exc, _412_TYPES):
+        return True
+    msg = str(exc)
+    return "412" in msg or "Precondition" in msg
 
 
 # ── MCP Tools ───────────────────────────────────────────────────────────────────
@@ -282,7 +310,7 @@ def update_event(
         event.save()
     except Exception as e:
         error_msg = str(e)
-        if "412" in error_msg or "Precondition" in error_msg:
+        if _is_412(e):
             _retry_update(client, cal, uid, params)
         else:
             raise RuntimeError(f"Failed to update event {uid}: {error_msg}") from e
@@ -314,8 +342,7 @@ def _retry_update(client, cal, uid: str, params: "UpdateParams") -> None:
             logger.info(f"Updated event {uid} (412 retry {attempt + 1} succeeded)")
             return
         except Exception as retry_err:
-            err_str = str(retry_err)
-            if ("412" in err_str or "Precondition" in err_str) and attempt < 2:
+            if _is_412(retry_err) and attempt < 2:
                 continue
             raise retry_err
 
