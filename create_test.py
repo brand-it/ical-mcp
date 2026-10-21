@@ -15,8 +15,10 @@ from helpers import event_to_dict
 
 
 class FakeCalendar:
-    """Captures add_event calls; supports event_by_uid for the update path
-    and the 412 retry path."""
+    """Captures add_event calls; supports the time-range lookup the
+    update/delete paths use (client.get_events -> match on event.id).
+    The fake ignores the date window and returns all stored events; the
+    server filters by UID in memory, so the window is irrelevant here."""
 
     def __init__(self, by_uid=None):
         self.stored = []
@@ -26,8 +28,8 @@ class FakeCalendar:
         self.stored.append(event)
         return event
 
-    def event_by_uid(self, uid):
-        return self._by_uid.get(uid)
+    def get_events(self, calendar, start=None, end=None):
+        return list(self._by_uid.values())
 
 
 class FakeEvent:
@@ -43,6 +45,7 @@ class FakeEvent:
             if c.name == "VEVENT":
                 self._comp = c
                 break
+        self.id = str(self._comp.get("uid", ""))
 
     @property
     def icalendar_component(self):
@@ -184,8 +187,9 @@ def _existing_event():
 def test_update_move_timed():
     print("\nupdate_event (move timed, naive -> local):")
     fake = _existing_event()
-    server.get_client = lambda: object()
-    server.get_calendar = lambda client: FakeCalendar(by_uid={"uid-123": fake})
+    cal = FakeCalendar(by_uid={"uid-123": fake})
+    server.get_client = lambda: cal
+    server.get_calendar = lambda client: cal
     result = server.update_event("uid-123", start="2026-10-27T09:00:00", tz="America/Los_Angeles")
     check_true("saved", len(fake.saved) == 1)
     d = event_to_dict(fake, tz_name="America/Los_Angeles")
@@ -197,8 +201,9 @@ def test_update_move_timed():
 def test_update_to_all_day():
     print("\nupdate_event (convert to all-day, start only):")
     fake = _existing_event()
-    server.get_client = lambda: object()
-    server.get_calendar = lambda client: FakeCalendar(by_uid={"uid-123": fake})
+    cal = FakeCalendar(by_uid={"uid-123": fake})
+    server.get_client = lambda: cal
+    server.get_calendar = lambda client: cal
     result = server.update_event("uid-123", start="2026-10-26", all_day=True)
     d = event_to_dict(fake, tz_name="America/Los_Angeles")
     check("all_day flag", d["all_day"], True)
@@ -210,8 +215,9 @@ def test_update_to_all_day():
 def test_update_all_day_multiday():
     print("\nupdate_event (all-day multi-day):")
     fake = _existing_event()
-    server.get_client = lambda: object()
-    server.get_calendar = lambda client: FakeCalendar(by_uid={"uid-123": fake})
+    cal = FakeCalendar(by_uid={"uid-123": fake})
+    server.get_client = lambda: cal
+    server.get_calendar = lambda client: cal
     server.update_event("uid-123", start="2026-10-26", end="2026-10-28", all_day=True)
     d = event_to_dict(fake, tz_name="America/Los_Angeles")
     check("start", d["start"], "2026-10-26")
@@ -220,8 +226,9 @@ def test_update_all_day_multiday():
 
 def test_update_not_found():
     print("\nupdate_event (missing UID):")
-    server.get_client = lambda: object()
-    server.get_calendar = lambda client: FakeCalendar()
+    cal = FakeCalendar()
+    server.get_client = lambda: cal
+    server.get_calendar = lambda client: cal
     try:
         server.update_event("nope", title="x")
         check("raised RuntimeError", False, True)

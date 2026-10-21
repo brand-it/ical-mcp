@@ -7,12 +7,10 @@ from datetime_parser import parse_datetime, parse_datetime_for_ical, ParsedDateT
 from recurrence import expand_recurring
 from helpers import event_to_dict, input_is_all_day, vevent_to_dict, build_event_feedback, all_day_end_date, set_all_day_dates
 from caldav import DAVClient
-from icalendar import Calendar
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("calendar-mcp")
-
 # ── Config ──────────────────────────────────────────────────────────────────────
 
 CALDAV_URL = os.environ.get("CALDAV_URL", "https://caldav.icloud.com/")
@@ -78,6 +76,24 @@ def _find_calendar_by_name(calendars, name: str):
         f"Calendar '{name}' not found. "
         f"Available: {[c.get_display_name() or '<unnamed>' for c in calendars]}"
     )
+
+
+def fetch_event_by_uid(client, cal, uid: str):
+    """Fetch one event by UID from a single calendar, or None.
+
+    iCloud rejects a UID-only calendar-query REPORT with 412 Precondition
+    Failed, so this issues a time-range REPORT (which iCloud accepts) and
+    filters by UID in memory. The window is wide (±365 days) to cover any
+    event a user references; matching is exact, so the window only bounds
+    the payload, not correctness.
+    """
+    now = datetime.now(timezone.utc)
+    start_dt = now - timedelta(days=365)
+    end_dt = now + timedelta(days=365)
+    for event in client.get_events(cal, start=start_dt, end=end_dt):
+        if str(getattr(event, "id", "") or "") == uid:
+            return event
+    return None
 
 
 # ── MCP Tools ───────────────────────────────────────────────────────────────────
@@ -240,7 +256,7 @@ def update_event(
 
     client = get_client()
     cal = get_calendar(client)
-    event = cal.event_by_uid(uid)
+    event = fetch_event_by_uid(client, cal, uid)
     if not event:
         raise RuntimeError(f"Event not found: {uid}")
 
@@ -267,30 +283,28 @@ def update_event(
     except Exception as e:
         error_msg = str(e)
         if "412" in error_msg or "Precondition" in error_msg:
-            raise _retry_update(cal, uid, params, error_msg) from e
-        raise RuntimeError(f"Failed to update event {uid}: {error_msg}") from e
+            _retry_update(client, cal, uid, params)
+        else:
+            raise RuntimeError(f"Failed to update event {uid}: {error_msg}") from e
 
     logger.info(f"Updated event {uid}")
     return build_event_feedback(vevent_to_dict(vevent, tz), tz)
 
 
-def _retry_update(cal, uid: str, params: "UpdateParams", original_error: str) -> Exception:
+def _retry_update(client, cal, uid: str, params: "UpdateParams") -> None:
     """Retry an update after a 412 Precondition Failed.
 
     Re-reads the event from the server, re-applies the changes, and saves.
-    Retries up to 3 times.
-
-    Returns:
-        RuntimeError if all retries fail.
+    Retries up to 3 times. Raises if all retries fail; returns None on success.
     """
     from helpers import apply_update
 
     for attempt in range(3):
         try:
             logger.info(f"412 retry {attempt + 1}/3 for {uid}")
-            fresh_event = cal.event_by_uid(uid)
+            fresh_event = fetch_event_by_uid(client, cal, uid)
             if not fresh_event:
-                raise RuntimeError(f"Event not found after 412: {uid}")
+                raise RuntimeError(f"Event not found: {uid}")
 
             fvevent = fresh_event.icalendar_component
             if fvevent is None:
@@ -298,14 +312,14 @@ def _retry_update(cal, uid: str, params: "UpdateParams", original_error: str) ->
             apply_update(fvevent, params)
             fresh_event.save()
             logger.info(f"Updated event {uid} (412 retry {attempt + 1} succeeded)")
-            return True
+            return
         except Exception as retry_err:
             err_str = str(retry_err)
             if ("412" in err_str or "Precondition" in err_str) and attempt < 2:
                 continue
             raise retry_err
 
-    return RuntimeError(f"Failed to update event {uid}: 412 after 3 retries")
+    raise RuntimeError(f"Failed to update event {uid}: 412 Precondition Failed after 3 retries")
 
 
 @mcp.tool()
@@ -320,19 +334,7 @@ def delete_event(uid: str) -> bool:
     """
     client = get_client()
     cal = get_calendar(client)
-    from icalendar import Calendar
-    events = client.get_events(cal)
-    event = None
-    for e in events:
-        raw = getattr(e, "_data", None) or getattr(e, "data", None)
-        if raw:
-            cal_obj = Calendar.from_ical(raw)
-            for comp in cal_obj.walk():
-                if comp.name == "VEVENT" and str(comp.get("uid", "")) == uid:
-                    event = e
-                    break
-        if event:
-            break
+    event = fetch_event_by_uid(client, cal, uid)
     if not event:
         raise RuntimeError(f"Event not found: {uid}")
     try:
