@@ -241,10 +241,21 @@ def test_is_412_detection():
     print("\n_is_412 (typed 412 detection):")
     # The typed 412 exceptions caldav raises for a stale If-Match /
     # If-Schedule-Tag-Match must be detected by type, not by string-matching.
-    check_true("ETagMismatchError is 412", server._is_412(_caldav_error.ETagMismatchError(url="x", reason="no reason")))
-    check_true("ScheduleTagMismatchError is 412", server._is_412(_caldav_error.ScheduleTagMismatchError(url="x", reason="no reason")))
-    # UID-conflict 412s inherit from the mismatch types -> still detected.
-    check_true("UidConflictETagMismatchError is 412", server._is_412(_caldav_error.UidConflictETagMismatchError(url="x", reason="no reason")))
+    # These attributes only exist on caldav that ships the typed 412 classes
+    # (absent at the requirements.txt floor of 1.3.0). Guard each so the suite
+    # stays floor-safe, mirroring server.py's own getattr-based degradation.
+    typed_412 = [
+        "ETagMismatchError",
+        "ScheduleTagMismatchError",
+        "UidConflictETagMismatchError",
+        "UidConflictScheduleTagMismatchError",
+    ]
+    for name in typed_412:
+        cls = getattr(_caldav_error, name, None)
+        if cls is None:
+            print(f"  (skip {name}: not present in this caldav version)")
+            continue
+        check_true(f"{name} is 412", server._is_412(cls(url="x", reason="no reason")))
     # A bare PutError whose message carries the 412 status (older caldav) ->
     # detected via the fallback.
     check_true("bare PutError w/ 412 in msg", server._is_412(_caldav_error.PutError(url="412 Precondition Failed", reason="no reason")))
