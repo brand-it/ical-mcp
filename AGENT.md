@@ -110,6 +110,7 @@ ical-mcp/
 ├── .gitignore
 ├── .github/workflows/build-and-publish.yml   # CI: test + build/push to GHCR
 ├── skills/ical-mcp/SKILL.md # quick task reference (mirrors the installed OMP skill)
+├── skills/ical-mcp-pr/SKILL.md # repo-specific PR process (ruleset, CI gates, bot approval, deploy)
 ├── server.py                # MCP tools + CalDAV client (entry point)
 ├── datetime_parser.py       # ISO 8601 parser
 ├── helpers.py               # event formatting / update application

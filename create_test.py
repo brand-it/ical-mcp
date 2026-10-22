@@ -9,6 +9,7 @@ sys.path.insert(0, ".")
 
 from datetime import date, datetime, timezone
 from icalendar import Calendar
+from caldav.lib import error as _caldav_error
 
 import server
 from helpers import event_to_dict
@@ -236,6 +237,33 @@ def test_update_not_found():
         check("raised RuntimeError", True, True)
 
 
+def test_is_412_detection():
+    print("\n_is_412 (typed 412 detection):")
+    # The typed 412 exceptions caldav raises for a stale If-Match /
+    # If-Schedule-Tag-Match must be detected by type, not by string-matching.
+    # These attributes only exist on caldav that ships the typed 412 classes
+    # (absent at the requirements.txt floor of 1.3.0). Guard each so the suite
+    # stays floor-safe, mirroring server.py's own getattr-based degradation.
+    typed_412 = [
+        "ETagMismatchError",
+        "ScheduleTagMismatchError",
+        "UidConflictETagMismatchError",
+        "UidConflictScheduleTagMismatchError",
+    ]
+    for name in typed_412:
+        cls = getattr(_caldav_error, name, None)
+        if cls is None:
+            print(f"  (skip {name}: not present in this caldav version)")
+            continue
+        check_true(f"{name} is 412", server._is_412(cls(url="x", reason="no reason")))
+    # A bare PutError whose message carries the 412 status (older caldav) ->
+    # detected via the fallback.
+    check_true("bare PutError w/ 412 in msg", server._is_412(_caldav_error.PutError(url="412 Precondition Failed", reason="no reason")))
+    # A non-412 error must NOT be treated as 412.
+    check("NotFoundError is not 412", server._is_412(_caldav_error.NotFoundError(url="x", reason="no reason")), False)
+    check("generic RuntimeError is not 412", server._is_412(RuntimeError("boom")), False)
+
+
 def run():
     test_create_all_day()
     test_create_all_day_multiday()
@@ -246,6 +274,7 @@ def run():
     test_update_to_all_day()
     test_update_all_day_multiday()
     test_update_not_found()
+    test_is_412_detection()
     print(f"\nResults: {passed} passed, {failed} failed")
     return failed == 0
 
